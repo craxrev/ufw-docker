@@ -21,12 +21,16 @@ function ufw-docker--list() {
     local INSTANCE_NAME="$1"
     local INSTANCE_PORT="${2:-}"
     local PROTO="${3:-${DEFAULT_PROTO}}"
+    local FROM="${4:-}"
 
     if [[ -z "$INSTANCE_PORT" ]]; then
         INSTANCE_PORT="[[:digit:]]\\+"
         PROTO="\\(tcp\\|udp\\)"
     fi
-    ufw status numbered | grep "# allow ${INSTANCE_NAME}\\( ${INSTANCE_PORT}\\/${PROTO}\\)\\?\$"
+    if [[ -z "$FROM" ]]; then
+        FROM="\\(any\\|[0-9.]\\+\\)"
+    fi
+    ufw status numbered | grep "# allow ${INSTANCE_NAME} from ${FROM}\\( ${INSTANCE_PORT}\\/${PROTO}\\)\\?\$"
 }
 
 function ufw-docker--list-number() {
@@ -44,6 +48,7 @@ function ufw-docker--allow() {
     local INSTANCE_NAME="$1"
     local INSTANCE_PORT="$2"
     local PROTO="$3"
+    local FROM="$4"
 
     docker inspect "$INSTANCE_NAME" &>/dev/null ||
         die "Docker instance \"$INSTANCE_NAME\" doesn't exist."
@@ -63,7 +68,7 @@ function ufw-docker--allow() {
     for PORT_PROTO in "${PORT_PROTO_LIST[@]}"; do
         if [[ -z "$INSTANCE_PORT" || "$PORT_PROTO" = "${INSTANCE_PORT}/${PROTO}" ]]; then
             for IP in "${INSTANCE_IP_ADDRESSES[@]}"; do
-                ufw-docker--add-rule "$INSTANCE_NAME" "$IP" "${PORT_PROTO%/*}" "${PORT_PROTO#*/}"
+                ufw-docker--add-rule "$INSTANCE_NAME" "$IP" "${PORT_PROTO%/*}" "${PORT_PROTO#*/}" "$FROM"
                 RETVAL="$?"
             done
         fi
@@ -92,14 +97,24 @@ function ufw-docker--add-rule() {
     local INSTANCE_IP_ADDRESS="$2"
     local PORT="$3"
     local PROTO="$4"
+    local FROM="$5"
 
     declare comment
 
-    echo "allow ${INSTANCE_NAME} ${PORT}/${PROTO}"
+    echo "allow ${INSTANCE_NAME} ${PORT}/${PROTO} from ${FROM}"
     typeset -a UFW_OPTS
-    UFW_OPTS=(route allow proto "${PROTO}"
-              from any to "$INSTANCE_IP_ADDRESS")
+
+    UFW_OPTS=(route allow proto "${PROTO}")
     comment="allow ${INSTANCE_NAME}"
+
+    [[ -z "$FROM" ]] && {
+        FROM="any"
+    }
+    UFW_OPTS+=(from "${FROM}")
+    comment="$comment from ${FROM}"
+
+    UFW_OPTS+=(to "$INSTANCE_IP_ADDRESS")
+
     [[ -n "$PORT" ]] && {
         UFW_OPTS+=(port "${PORT}")
         comment="$comment ${PORT}/${PROTO}"
@@ -341,8 +356,8 @@ function ufw-docker--install() {
 function ufw-docker--help() {
 	cat <<-EOF >&2
 	Usage:
-	  ufw-docker <list|allow> [docker-instance-id-or-name [port[/tcp|/udp]]]
-	  ufw-docker delete allow [docker-instance-id-or-name [port[/tcp|/udp]]]
+	  ufw-docker <list|allow> [docker-instance-id-or-name [port[/tcp|/udp]] [from]]
+	  ufw-docker delete allow [docker-instance-id-or-name [port[/tcp|/udp]] [from]]
 
 	  ufw-docker service allow <swarm-service-id-or-name <port</tcp|/udp>>>
 	  ufw-docker service delete allow <swarm-service-id-or-name>
@@ -363,6 +378,7 @@ function ufw-docker--help() {
 	  ufw-docker allow httpd
 	  ufw-docker allow httpd 80
 	  ufw-docker allow httpd 80/tcp
+      ufw-docker allow httpd 80/tcp 127.0.0.1
 
 	  ufw-docker delete allow httpd
 	  ufw-docker delete allow httpd 80/tcp
@@ -421,7 +437,9 @@ case "$ufw_action" in
 
         INSTANCE_PORT="${INSTANCE_PORT%/*}"
 
-        "ufw-docker--$ufw_action" "$INSTANCE_NAME" "$INSTANCE_PORT" "$PROTO"
+        INSTANCE_FROM="${2:-}"
+
+        "ufw-docker--$ufw_action" "$INSTANCE_NAME" "$INSTANCE_PORT" "$PROTO" "$INSTANCE_FROM"
         ;;
     service|raw-command|add-service-rule)
         shift || true
